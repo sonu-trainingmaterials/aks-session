@@ -1,0 +1,85 @@
+
+
+1) Create ACR with admin user enabled
+	az acr create -n <acr-name> -g <group-name> --sku basic --location <location> --admin-enabled
+	
+2) Created the app docker image and pushed to ACR
+	az acr login -n <acrname> -g <res-grp-name>
+	docker push <image-name:version>
+	
+3) Create the AKS cluster
+	az aks create -n <cluster-name> -g <group-name> --node-count <number> --node-vm-size <vm-size> --generate-ssh-keys
+	
+4) Install the Kubectl in client machine
+	az aks install-cli
+	
+5) Authenticate and connect to AKS cluster
+	az aks get-credentials -n <cluster-name> -g <group-name>
+	
+6) View the kubectl config
+	kubectl config view
+	
+7) View cluster resource details
+	kubectl get nodes
+	kubectl get deploy
+	kubectl get svc
+	kubectl get pods
+	kubectl get rs
+	kubectl get secret
+	
+8) Create a kubernets secret for storing the ACR login credentials in AKS secret
+	kubectl create secret docker-registry <secret-name> --docker-server="<your-acr-name>.azurecr.io" \
+		--docker-username=<acr-admin-username> \
+		--docker-password=<acr-admin-password>
+	
+9) Verify the secret creation 
+	kubectl get secret
+	
+10) Deploy containerized application
+		Update the yaml:
+			- Image name 
+			- No of pods (replica)
+			- Match label selector value
+			- imagePullSecret - name of the secret created above
+		Run the command to deploy yaml
+			kubectl apply -f <yaml-file-name>
+			
+11) Check the deployment status
+	kubectl get deploy
+	kubectl get pods
+	kubectl get rs
+	
+12) Create a load balancer type service to access the application
+	- Verify the match label 
+	- type :LoadBalancer
+	- service port and target container port
+	Deploy using 
+		kubectl apply -f <service-yaml-file-name>
+		
+13) Verify the service details
+	kubectl get svc
+	
+14) Copy the EXTERNAL_IP address to browser and navigate
+	
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
