@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bst-azurefile
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: bst-azurefile
+  resources:
+    requests:
+      storage: 5Gi

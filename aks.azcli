@@ -1,0 +1,485 @@
+
+resourceGroup="AksWorkshopGroup"
+location="southeastasia"
+aksName="workshopaks"
+nodeSize="standard_b2ms"
+randomId=$RANDOM
+
+# Login to Azure 
+az login
+
+# Create a resource group
+az group create --location $location --name $resourceGroup
+
+# Check the monitoring services already registered in subscription
+az provider show -n Microsoft.OperationsManagement -o table
+az provider show -n Microsoft.OperationalInsights -o table
+
+# If not registered, register the monitoring services
+az provider register --namespace Microsoft.OperationsManagement
+az provider register --namespace Microsoft.Microsoft.OperationalInsights
+
+# Create the AKS cluster 
+az aks create --resource-group $resourceGroup \
+    --name $aksName \
+    --node-count 3 \
+    --node-vm-size $nodeSize \
+    --enable-addons monitoring \
+    --generate-ssh-keys
+
+# Install Kubernetes CLI
+az aks install-cli
+
+# Get credentials of AKS
+az aks get-credentials -g $resourceGroup -n $aksName
+
+# List the kubectl config
+kubectl config view
+
+# Switch to the aks cluster context
+kubectl config use-context $aksName
+
+# List all nodes
+kubectl get nodes
+
+----------------------------------------------------
+server="sqlserver-$randomId"
+username="labuser"
+password="Password@123"
+startIP="0.0.0.0"
+endIP="255.255.255.255"
+database="bankdb"
+
+# Create Azure SQL database 
+az sql server create --name $server \
+    --resource-group $resourceGroup \
+    --location $location \
+    --admin-user $username \
+    --admin-password $password
+
+# Configure the firewall rule
+az sql server firewall-rule create --resource-group $resourceGroup  \
+    --server $server \
+    --name "AllowYourIp" \
+    --start-ip-address $startIP \
+    --end-ip-address $endIP
+
+# Create a database
+# zone redundancy is only supported on premium and business critical service tiers
+# capacity is the DTU valud or no of vCores
+az sql db create --resource-group $resourceGroup \
+    --server $server \
+    --name $database \
+    --edition GeneralPurpose \
+    --family Gen5 \
+    --capacity 2 \
+    --backup-storage-redundancy Local \
+    --zone-redundant false 
+
+#Get the connection string 
+az sql db show-connection-string --server $server \
+    --name $database \
+    --auth-type SqlPassword \
+    --client ado.net
+-------------------------------------------------------------
+# Create ACR
+acrName="acr$randomId"
+az acr create --name $acrName \
+    --resource-group $resourceGroup \
+    --location $location \
+    --admin-enabled \
+    --sku Basic
+
+# Login to ACR
+az acr login --name $acrName
+
+----------------------------------------
+#Open BSTBankServcie Project in VS Code and run the following command
+$acrName="<set the acrName here>"
+az acr build -t bst-bank-service:{{.Run.ID}} -r $acrName .
+
+#Open BST-bank-ng-client project and update the connection string in app.config file and run the following command
+$acrName="<set the acrName here>"
+az acr build -t bst-bank-portal:{{.Run.ID}} -r $acrName .
+-----------------------------------------------
+# Install K8S dashboard
+# use k8s-dashboard.yaml file or the github url (https://raw.githubusercontent.com/kubernetes/dashboard/v2.0.0/aio/deploy/recommended.yaml)
+kubectl apply -f k8s-dashboard.yaml
+# Create a K8S dashboard user
+kubectl apply -f k8s-dashboard-user.yaml
+# Assign roles to dashboard user
+kubectl apply -f k8s-dashboard-rolebinding.yaml
+# Get the access token for dashboard user
+kubectl -n kubernetes-dashboard describe secret $(kubectl -n kubernetes-dashboard get secret | grep admin-user | awk '{print $1}')
+# Open dashboard
+kubectl proxy
+# navigate to http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/.
+
+------------------------------------------------------------------------------------------
+#Create and deploy K8S services
+
+# To pull images from ACR, your AKS cluster needs necessary permissions to access ACR. 
+# This can be done in many ways 
+#   1) Use an image Pull secret that is stored in AKS cluster
+#   2) Use ACR integration for AKS.
+
+# Method 1: Use an image pull secret stored in AKS
+ACR_NAME="<YOUR ACR NAME>"
+SERVICE_PRINCIPAL_NAME="workshop-acr-sp"
+# Obtain the full registry ID for subsequent command args
+ACR_REGISTRY_ID=$(az acr show --name $ACR_NAME --query id --output tsv)
+# Create the service principal with rights scoped to the registry.
+# Default permissions are for docker pull access. Modify the '--role'
+# argument value as desired:
+# acrpull:     pull only
+# acrpush:     push and pull
+# owner:       push, pull, and assign roles
+SP_PASSWD=$(az ad sp create-for-rbac --name http://$SERVICE_PRINCIPAL_NAME --scopes $ACR_REGISTRY_ID --role acrpull --query password --output tsv)
+SP_APP_ID=$(az ad sp show --id http://$SERVICE_PRINCIPAL_NAME --query appId --output tsv)
+
+# If you forgot the password/not saved then reset the credentials
+az ad sp credential reset  --name http://$SERVICE_PRINCIPAL_NAME --query password --output tsv
+
+# Create an image pull secret in AKS 
+kubectl create secret docker-registry acr-pull-secret --docker-server="<your-acr-name>.azurecr.io" \
+    --docker-username=$SP_APP_ID \
+    --docker-password=$SP_PASSWD
+
+# Deploy the backend api
+# Open bst-api.deploy.yaml and confirm the same secret name ('acr-pull-secret') is specified for imagePullSecrets
+kubectl apply -f bst-api.deploy.yaml
+kubectl apply -f bst-api.service.yaml
+
+# See kubernetes services and deployments in Azure portal
+az aks browse -g AksWorkshopGroup -n workshopaks
+
+# Method 2: Using ACR integration with AKS
+# Update the cluster to integrate with ACR
+
+az aks update -n $aksName -g $resourceGroup --attach-acr <acr-name>
+
+# Dont Try: Remove the ACR integration with following command 
+az aks update --n $aksName -g $resourceGroup --detach-acr <acr-name>
+
+# Deploy the front end apps 
+kubectl apply -f bst-portal.deploy.yaml
+kubectl apply -f bst-portal.service.yaml
+
+------------------------------------------------------------------------------
+
+# Scaling: 
+    # Manual scaling of Pods or Nodes
+    # Horizontal Pod Autoscaling (HPA)
+    # Manually scale Nodes
+    # Cluster Autoscalar
+
+# Scenario 1: Manually scale pods
+# Scale the frontend app (deployment name:bst-portal) using manual scaling (scale to 1 instance)
+kubectl scale --replicas=1 deployment/bst-portal 
+
+#Scenario 2: Horizontal Pod Autoscalar
+# Scale the backend (deployment name: bst-api) to  instance
+# Check the version of AKS cluster, if version is < 1.10 , Metric server will not be automatically installed
+az aks show -g $resourceGroup -n $aksName --query kubernetesVersion --output table
+
+#Create a Pod Autoscalar
+kubectl autoscale deployment bst-api --cpu-percent=50 --min=3 --max=10
+# OR use the YAML deployment file
+kubectl apply -f bst-api.hpa.yaml
+
+# Scenario 3: Manually scale Nodes
+# view the current number of nodes
+kubectl get nodes 
+# scale the number of nodes to 2
+az aks scale -g $resourceGroup -n $aksName --node-count 2
+# view the updated number of nodes
+kubectl get nodes 
+
+#Scenario 4: Enable custer autoscaler for the cluster
+az aks update \
+  --resource-group $resourceGroup \
+  --name $aksName \
+  --enable-cluster-autoscaler \
+  --min-count 1 \
+  --max-count 3
+
+# Update autoscaler settings (increase the max-count to 5)
+az aks update \
+  --resource-group $resourceGroup \
+  --name $aksName \
+  --update-cluster-autoscaler \
+  --min-count 1 \
+  --max-count 5
+
+# Update default autoscaling parameters (Idle timeout for scale in, scan interval etc)
+# https://docs.microsoft.com/en-us/azure/aks/cluster-autoscaler#using-the-autoscaler-profile
+az aks update \
+  --resource-group $resourceGroup \
+  --name $aksName \
+  --cluster-autoscaler-profile scan-interval=30s scale-down-unneeded-time=20m
+
+# Disable cluster auto scaler
+az aks update \
+  --resource-group $resourceGroup \
+  --name $aksName \
+  --disable-cluster-autoscaler
+
+-------------------------------------------------------------------
+
+# Create and assign persistent volume for Pods
+    # Assign dynamic or static volumes
+    # Volumes can be Azure Disk, File Share or a NFS server
+    # Azure Disk can be attached to a single node, for shared volume use FileShare
+# Demo 1:  Assign dynamic volume using Azure FileShare
+# Create a storage class
+kubectl apply -f azure-fileshare.sc.yaml
+# Create a PVC
+kubectl apply -f azure-fileshare.pvc.yaml
+# Update the backend service deployment to use PVC (ensure the claim name matches pvc name)
+kubectl replace -f bst-api.deploy_with_volume.yaml
+
+-----------------------------------------------------------------
+# Update the application (update deployment with a new version of image)
+
+kubectl set image deployment bst-api bst-api=acr3159/bst-api-service:cm1
+
+----------------------------------------------------------------------------
+# ADVANCED NETWORKING:
+# Deploying AKS Cluster with Azure CNI
+
+resourceGroup="AksWorkshopGroup"
+location="southeastasia"
+aksName="workshopaks"
+nodeSize="standard_b2ms"
+randomId=$RANDOM
+vnetName="AksVnet"
+vnetAddressSpace="10.20.0.0/16"
+subnetName="bst-app-subnet"
+subnetAddressSpace="10.20.1.0/24"
+acrName="acr$randomId"
+
+az group create -n $resourceGroup -l $location
+
+#Create the VNET
+az network vnet create \
+  --name $vnetName \
+  --resource-group $resourceGroup \
+  --location $location \
+  --address-prefix $vnetAddressSpace \
+  --subnet-name $subnetName \
+  --subnet-prefix $subnetAddressSpace
+
+az aks create \
+    --resource-group $resourceGroup \
+    --name $aksName \
+    --network-plugin azure \
+    --vnet-subnet-id <subnet-id> \
+    --docker-bridge-address 172.17.0.1/16 \
+    --dns-service-ip 10.2.0.10 \
+    --service-cidr 10.2.0.0/24 \
+    --generate-ssh-keys
+
+# Get Subnet Id
+SUBNET_ID=$(az network vnet subnet list \
+    --resource-group $resourceGroup \
+    --vnet-name $vnetName \
+    --query "[0].id" --output tsv)
+
+# Create AKS with Vnet
+az aks create \
+    --resource-group $resourceGroup \
+    --name $aksName \
+    --node-count 3 \
+    --node-vm-size $nodeSize \
+    --enable-addons monitoring \
+    --attach-acr $acrName \
+    --network-plugin azure \
+    --vnet-subnet-id $SUBNET_ID \
+    --docker-bridge-address 172.17.0.1/16 \
+    --dns-service-ip 10.20.0.10 \
+    --service-cidr 10.20.0.0/24 \
+    --generate-ssh-keys
+
+# az aks enable-addons -a monitoring -n $aksName -g $resourceGroup 
+# az aks update -n $aksName -g $resourceGroup --attach-acr acr3159
+
+# Prepare the kubectl 
+az aks get-credentials --resource-group $resourceGroup --name $aksName --overwrite-existing
+------------------------------------------------------------------------------------------------
+
+# Install K8S Dashboard
+kubectl apply -f k8s-dashboard.yaml
+# Create a K8S dashboard user
+kubectl apply -f k8s-dashboard-user.yaml
+# Assign roles to dashboard user
+kubectl apply -f k8s-dashboard-rolebinding.yaml
+# Get the access token for dashboard user
+kubectl -n kubernetes-dashboard describe secret $(kubectl -n kubernetes-dashboard get secret | grep admin-user | awk '{print $1}')
+# Run dashboard servcie
+kubectl proxy
+# Open dashboard
+
+-------------------------------------------------------------------------------
+
+# Deploy SQL Server with PVC, Bst-api-service and bst-portal to the cluster
+kubectl apply -f AKS_Networking/mssql-pvc.yaml
+
+# Create a secret for MSSQL sa user password
+kubectl create secret generic mssql --from-literal=SA_PASSWORD="Password@123"
+
+# Deploy MSSQL database pod
+kubectl apply -f AKS_Networking/mssql-deploy.yaml
+
+# Deploy the Bst backend service
+kubectl apply -f AKS_Networking/bst-api.deploy.yaml
+kubectl apply -f AKS_Networking/bst-api.service.yaml
+kubectl apply -f AKS_Networking/bst-portal.deploy.yaml
+kubectl apply -f AKS_Networking/bst-portal.service.yaml
+--------------------------------------------------------------------------
+# Installing and configuring HELM
+# On Windows:  Open PowerShell in admin mode and run the following
+    # Install chocolaty:
+    Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+    # Install HELM
+    choco install kubernetes-helm
+
+# On Ubuntu:
+    curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+    chmod 700 get_helm.sh
+    ./get_helm.sh
+
+----------------------------------------------------------------------
+# Ingress Controller
+# An ingress controller is a piece of software that provides reverse proxy, configurable traffic routing, and TLS termination for Kubernetes services. 
+    # 1) Http Application Routing add-on (Dev/Test)
+    # 2) NGINX controller
+
+# Install and configure NGINX ingress controller
+# Create a namespace for your ingress resources
+kubectl create namespace ingress-basic
+
+# Add the ingress-nginx repository
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+
+# Use Helm to deploy an NGINX ingress controller
+helm install nginx-ingress ingress-nginx/ingress-nginx \
+    --namespace ingress-basic \
+    --set controller.replicaCount=2 \
+    --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux \
+    --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux \
+    --set controller.admissionWebhooks.patch.nodeSelector."beta\.kubernetes\.io/os"=linux
+
+# View ingress services
+kubectl get services --namespace ingress-basic
+
+# Delete the already deployed front-end service
+kubectl delete svc  bst-portal-service
+
+# Update the type attribute value as ClusterIP bst-portal.service.yaml
+# deploy the service 
+kubectl apply -f AKS_Networking/bst-portal.deploy.yaml --namespace ingress-basic
+kubectl apply -f AKS_Networking/bst-portal.service.yaml --namespace ingress-basic
+
+# deploy an ingress route
+kubectl apply -f AKS_Networking/bst-portal.ingress.yaml --namespace ingress-basic
+
+# Delete the ingress-basic namespace
+# kubectl delete namespace ingress-basic
+
+-----------------------------------------------------------------------------------------------
+# AKS managed  Azure AD 
+# List existing groups in the directory
+# Create an Azure AD group
+az ad group create --display-name AksAdminGroup --mail-nickname aksadmingroup
+
+groupObjectId=$(az ad group show -g AksAdminGroup  --query objectId -o tsv)
+echo $groupObjectId
+
+# Update the cluster to use AAD integration 
+az aks update -g $resourceGroup -n $aksName --enable-aad --aad-admin-group-object-ids $groupObjectId
+
+# Create an AKS-managed Azure AD cluster
+#az aks create -g $resourceGroup -n $aksName --enable-aad --aad-admin-group-object-ids $groupObjectId
+
+az aks get-credentials -g $resourceGroup -n $aksName
+
+----------------------------------------------------
+# Enable Kubernetes RBAC 
+# Requires Managed Azure AD integration.
+# During preview integrating RBAC to existing cluster not supported, but it will be available in GA
+
+# Install AKS preview extension
+az extension add --name aks-preview
+# Enable AzureRBACPreview in subscription
+az feature register --namespace "Microsoft.ContainerService" --name "EnableAzureRBACPreview"
+# Refresh the registration of the Microsoft.ContainerService resource provider
+az provider register --namespace Microsoft.ContainerService
+
+resourceGroup="AksWorkshopGroup"
+location="southeastasia"
+aksName="workshopaks"
+nodeSize="standard_b2ms"
+vnetName="AksVnet"
+vnetAddressSpace="10.20.0.0/16"
+subnetName="bst-app-subnet"
+subnetAddressSpace="10.20.1.0/24"
+
+SUBNET_ID=$(az network vnet subnet list \
+    --resource-group $resourceGroup \
+    --vnet-name $vnetName \
+    --query "[0].id" --output tsv)
+
+# If admin user group is not created then create a group, if exists ignore the below line
+az ad group create --display-name AksAdminGroup --mail-nickname aksadmingroup
+# Get the group object Id
+groupObjectId=$(az ad group show -g AksAdminGroup  --query objectId -o tsv)
+# Create the AKS cluster 
+az aks create --resource-group $resourceGroup \
+    --name $aksName \
+    --node-count 2 \
+    --node-vm-size $nodeSize \
+    --enable-addons monitoring \
+    --attach-acr acr3159 \
+    --generate-ssh-keys \
+    --network-plugin azure \
+    --vnet-subnet-id $SUBNET_ID \
+    --docker-bridge-address 172.17.0.1/16 \
+    --dns-service-ip 10.20.0.10 \
+    --service-cidr 10.20.0.0/24 \
+    --enable-aad \
+    --aad-admin-group-object-ids $groupObjectId \
+    --enable-azure-rbac
+
+# To assign admingroups to exiting clusters  use the below command
+# az aks update -g $resourceGroup -n $aksName  --aad-admin-group-object-ids $groupObjectId
+
+# Assign roles to users scoped to AKS cluster
+az ad user create --display-name "aksuser" \
+                  --password "Password@123" \
+                  --user-principal-name "aksuser@sonusathyadashotmail.onmicrosoft.com" \
+                  --force-change-password-next-login false
+AKS_ID=$(az aks show -g $resourceGroup -n $aksName --query id -o tsv)
+aadEntityId="aksuser@sonusathyadashotmail.onmicrosoft.com"
+# aadEntityId="bf5a5b6f-ea88-4919-a28f-8eceac3724c7" # Use the current user object id to test
+az role assignment create --role "Azure Kubernetes Service RBAC Admin" --assignee $aadEntityId --scope $AKS_ID
+
+# Run the following commands
+az aks get-credentials -g $resourceGroup -n $aksName
+
+kubectl get nodes
+
+# If showing forbidden error then add the user to the AksAdminGroup
+-----------------------------------------------------------------------------------------------------
+
+# Rolling updates
+# Default update strategy is Rolling updates
+# To deploy with explicit update strategy run the following 
+kubectl apply -f RollingUpdates/bst-api.deploy.yaml
+
+# Update the image (specify a new version)
+kubectl set image deployments/bst-api bst-api=acr3159/bst-api-service:cm6
+
+kubectl rollout status deployments/bst-api
+
+# To rollback to a previous version 
+kubectl set image deployments/bst-api bst-api=acr3159/bst-api-service:cm4

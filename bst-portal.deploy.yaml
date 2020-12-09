@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bst-portal
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bst-portal
+  template:
+    metadata:
+      labels:
+        app: bst-portal
+    spec:
+      containers:
+      - name: bst-frontend
+        image: acr3159.azurecr.io/bst-bank-portal:cm3
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 80
+      
+      
